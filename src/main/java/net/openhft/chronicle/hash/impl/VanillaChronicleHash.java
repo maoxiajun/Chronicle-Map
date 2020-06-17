@@ -46,6 +46,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
@@ -93,7 +94,7 @@ public abstract class VanillaChronicleHash<K,
     public transient boolean createdOrInMemory;
     /////////////////////////////////////////////////
     // Key Data model
-    public Class<K> keyClass;
+    public Type keyClass;
     public SizeMarshaller keySizeMarshaller;
     public SizedReader<K> keyReader;
     public DataAccess<K> keyDataAccess;
@@ -126,6 +127,7 @@ public abstract class VanillaChronicleHash<K,
     public transient Identity identity;
     protected int log2TiersInBulk;
     private Runnable preShutdownAction;
+    private boolean skipCloseOnExitHook;
     /////////////////////////////////////////////////
     // Bytes Store (essentially, the base address) and serialization-dependent offsets
     protected transient BytesStore bs;
@@ -211,6 +213,7 @@ public abstract class VanillaChronicleHash<K,
         checksumEntries = privateAPI.checksumEntries();
 
         preShutdownAction = privateAPI.getPreShutdownAction();
+        skipCloseOnExitHook = privateAPI.skipCloseOnExitHook();
     }
 
     public static IOException throwRecoveryOrReturnIOException(
@@ -229,11 +232,13 @@ public abstract class VanillaChronicleHash<K,
 
     @Override
     public void readMarshallable(@NotNull WireIn wire) {
+        ;
         readMarshallableFields(wire);
         initTransients();
     }
 
     public Runnable getPreShutdownAction() {
+        throwExceptionIfClosed();
         return preShutdownAction;
     }
 
@@ -245,7 +250,7 @@ public abstract class VanillaChronicleHash<K,
         // that doesn't guarantee (?) to initialize fields with default values (false for boolean)
         createdOrInMemory = false;
 
-        keyClass = wireIn.read(() -> "keyClass").typeLiteral();
+        keyClass = wireIn.read(() -> "keyClass").lenientTypeLiteral();
         keySizeMarshaller = wireIn.read(() -> "keySizeMarshaller").object(SizeMarshaller.class);
         keyReader = wireIn.read(() -> "keyReader").object(SizedReader.class);
         keyDataAccess = wireIn.read(() -> "keyDataAccess").object(DataAccess.class);
@@ -287,6 +292,7 @@ public abstract class VanillaChronicleHash<K,
 
     @Override
     public void writeMarshallable(@NotNull WireOut wireOut) {
+        ;
         wireOut.write(() -> "dataFileVersion").text(dataFileVersion);
 
         wireOut.write(() -> "keyClass").typeLiteral(keyClass);
@@ -334,6 +340,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public VanillaGlobalMutableState globalMutableState() {
+        throwExceptionIfClosed();
         return globalMutableState;
     }
 
@@ -375,6 +382,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void initTransients() {
+        throwExceptionIfClosed();
         initOwnTransients();
     }
 
@@ -468,15 +476,20 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void setResourcesName() {
+        throwExceptionIfClosed();
         resources.setChronicleHashIdentityString(toIdentityString());
     }
 
     public void registerCleaner() {
+        throwExceptionIfClosed();
         this.cleaner = CleanerUtils.createCleaner(this, resources);
     }
 
     public void addToOnExitHook() {
-        ChronicleHashCloseOnExitHook.add(this);
+        throwExceptionIfClosed();
+        if (!skipCloseOnExitHook) {
+            ChronicleHashCloseOnExitHook.add(this);
+        }
     }
 
     public final void createMappedStoreAndSegments(ChronicleHashResources resources)
@@ -605,12 +618,14 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void onHeaderCreated() {
+        throwExceptionIfClosed();
     }
 
     /**
      * @return the version of Chronicle Map that was used to create the current data file
      */
     public String persistedDataVersion() {
+        throwExceptionIfClosed();
         return dataFileVersion;
     }
 
@@ -630,6 +645,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public long mapHeaderInnerSize() {
+        throwExceptionIfClosed();
         return headerSize + globalMutableStateTotalUsedSize();
     }
 
@@ -664,7 +680,9 @@ public abstract class VanillaChronicleHash<K,
         // Releases nothing after resources.releaseManually(), only removes the cleaner
         // from the internal linked list of all cleaners.
         cleaner.clean();
-        ChronicleHashCloseOnExitHook.remove(this);
+        if (!skipCloseOnExitHook) {
+            ChronicleHashCloseOnExitHook.remove(this);
+        }
         // Make GC life easier
         keyReader = null;
         keyDataAccess = null;
@@ -672,12 +690,15 @@ public abstract class VanillaChronicleHash<K,
 
     @Override
     public boolean isOpen() {
+        throwExceptionIfClosed();
         return !resources.closed();
     }
 
     public final void checkKey(Object key) {
+        Class<K> keyClass = keyClass();
         if (!keyClass.isInstance(key)) {
-            // key.getClass will cause NPE exactly as needed
+            if (key == null)
+                throw new NullPointerException("null key not supported");
             throw new ClassCastException(toIdentityString() + ": Key must be a " +
                     keyClass.getName() + " but was a " + key.getClass());
         }
@@ -688,6 +709,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public long bsAddress() {
+        throwExceptionIfClosed();
         return bs.addressForRead(0);
     }
 
@@ -719,6 +741,7 @@ public abstract class VanillaChronicleHash<K,
 
     @Override
     public int segments() {
+        throwExceptionIfClosed();
         return actualSegments;
     }
 
@@ -727,6 +750,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void globalMutableStateLock() {
+        throwExceptionIfClosed();
         globalMutableStateLockAcquisitionStrategy.acquire(
                 globalMutableStateLockTryAcquireOperation, globalMutableStateLockingStrategy,
                 nativeAccess(), null,
@@ -734,6 +758,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void globalMutableStateUnlock() {
+        throwExceptionIfClosed();
         globalMutableStateLockingStrategy.unlock(nativeAccess(), null,
                 globalMutableStateAddress() + GLOBAL_MUTABLE_STATE_LOCK_OFFSET);
     }
@@ -742,15 +767,18 @@ public abstract class VanillaChronicleHash<K,
      * For tests
      */
     public boolean hasExtraTierBulks() {
+        throwExceptionIfClosed();
         return globalMutableState.getAllocatedExtraTierBulks() > 0;
     }
 
     @Override
     public long offHeapMemoryUsed() {
+        throwExceptionIfClosed();
         return resources.totalMemory();
     }
 
     public long allocateTier() {
+        throwExceptionIfClosed();
         globalMutableStateLock();
         try {
             long tiersInUse = globalMutableState.getExtraTiersInUse();
@@ -827,6 +855,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void msync() throws IOException {
+        throwExceptionIfClosed();
         if (persisted()) {
             msync(bsAddress(), bs.capacity());
         }
@@ -847,6 +876,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void linkAndZeroOutFreeTiers(long firstTierIndex, long lastTierIndex) {
+        throwExceptionIfClosed();
         for (long tierIndex = firstTierIndex; tierIndex <= lastTierIndex; tierIndex++) {
             long tierOffset = tierBytesOffset(tierIndex);
             BytesStore tierBytesStore = tierBytesStore(tierIndex);
@@ -860,10 +890,12 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public long extraTierIndexToTierIndex(long extraTierIndex) {
+        throwExceptionIfClosed();
         return actualSegments + extraTierIndex + 1;
     }
 
     public long tierIndexToBaseAddr(long tierIndex) {
+        throwExceptionIfClosed();
         // tiers are 1-counted, to allow tierIndex = 0 to be un-initialized in off-heap memory,
         // convert into 0-based form
         long tierIndexMinusOne = tierIndex - 1;
@@ -873,6 +905,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public BytesStore tierBytesStore(long tierIndex) {
+        throwExceptionIfClosed();
         long tierIndexMinusOne = tierIndex - 1;
         if (tierIndexMinusOne < actualSegments)
             return bs;
@@ -880,6 +913,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public long tierBytesOffset(long tierIndex) {
+        throwExceptionIfClosed();
         long tierIndexMinusOne = tierIndex - 1;
         if (tierIndexMinusOne < actualSegments)
             return segmentOffset(tierIndexMinusOne);
@@ -1015,6 +1049,7 @@ public abstract class VanillaChronicleHash<K,
     }
 
     public void addCloseable(Closeable closeable) {
+        throwExceptionIfClosed();
         resources.addCloseable(closeable);
     }
 
@@ -1022,6 +1057,7 @@ public abstract class VanillaChronicleHash<K,
      * For testing only
      */
     public List<WeakReference<ContextHolder>> allContexts() {
+        throwExceptionIfClosed();
         return Collections.unmodifiableList(resources.contexts());
     }
 
@@ -1046,6 +1082,7 @@ public abstract class VanillaChronicleHash<K,
      */
     public class Identity {
         public VanillaChronicleHash hash() {
+            throwExceptionIfClosed();
             return VanillaChronicleHash.this;
         }
     }

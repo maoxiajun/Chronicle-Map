@@ -32,11 +32,14 @@ import net.openhft.chronicle.hash.impl.util.CanonicalRandomAccessFiles;
 import net.openhft.chronicle.hash.impl.util.Throwables;
 import net.openhft.chronicle.hash.impl.util.math.PoissonDistribution;
 import net.openhft.chronicle.hash.serialization.*;
+import net.openhft.chronicle.hash.serialization.impl.BytesMarshallableReaderWriter;
+import net.openhft.chronicle.hash.serialization.impl.MarshallableReaderWriter;
 import net.openhft.chronicle.hash.serialization.impl.SerializationBuilder;
 import net.openhft.chronicle.map.replication.MapRemoteOperations;
 import net.openhft.chronicle.set.ChronicleSetBuilder;
 import net.openhft.chronicle.values.ValueModel;
 import net.openhft.chronicle.values.Values;
+import net.openhft.chronicle.wire.Marshallable;
 import net.openhft.chronicle.wire.TextWire;
 import net.openhft.chronicle.wire.Wire;
 import org.jetbrains.annotations.NotNull;
@@ -167,7 +170,7 @@ public final class ChronicleMapBuilder<K, V> implements
     /**
      * Default timeout is 1 minute. Even loopback tests converge often in the course of seconds,
      * let alone WAN replication over many nodes might take tens of seconds.
-     * <p/>
+     * <p>
      * TODO review
      */
     long cleanupTimeout = 1;
@@ -181,6 +184,7 @@ public final class ChronicleMapBuilder<K, V> implements
     MapEntryOperations<K, V, ?> entryOperations = mapEntryOperations();
     MapRemoteOperations<K, V, ?> remoteOperations = mapRemoteOperations();
     Runnable preShutdownAction;
+    boolean skipCloseOnExitHook = false;
     private String name;
     // not final because of cloning
     private ChronicleMapBuilderPrivateAPI<K, V> privateAPI =
@@ -279,6 +283,53 @@ public final class ChronicleMapBuilder<K, V> implements
             @NotNull Class<K> keyClass, @NotNull Class<V> valueClass) {
         return new ChronicleMapBuilder<>(keyClass, valueClass);
     }
+
+    /**
+     * Returns a new {@code ChronicleMapBuilder} instance which is able to {@linkplain #create()
+     * create} maps with the specified key and value classes. It makes some assumptions about the size of entries
+     * and the marshallers used
+     *
+     * @param keyClass   class object used to infer key type and discover it's properties via
+     *                   reflection
+     * @param valueClass class object used to infer value type and discover it's properties via
+     *                   reflection
+     * @param <K>        key type of the maps, created by the returned builder
+     * @param <V>        value type of the maps, created by the returned builder
+     * @return a new builder for the given key and value classes
+     */
+    public static <K, V> ChronicleMapBuilder<K, V> simpleMapOf(
+            @NotNull Class<K> keyClass, @NotNull Class<V> valueClass) {
+        ChronicleMapBuilder<K, V> builder =
+                new ChronicleMapBuilder<>(keyClass, valueClass)
+                        .putReturnsNull(true)
+                        .removeReturnsNull(true);
+        builder.name(toCamelCase(valueClass.getSimpleName()));
+        if (!builder.isKeySizeKnown())
+            builder.averageKeySize(128);
+        if (!builder.isValueSizeKnown())
+            builder.averageValueSize(512);
+        if (BytesMarshallable.class.isAssignableFrom(valueClass)) {
+            builder.valueMarshaller(new BytesMarshallableReaderWriter<>((Class) valueClass));
+        } else if (Marshallable.class.isAssignableFrom(valueClass)) {
+            //noinspection unchecked
+            builder.averageValueSize(1024)
+                    .valueMarshaller(new MarshallableReaderWriter<>((Class) valueClass));
+        }
+        return builder;
+    }
+
+    private static String toCamelCase(String name) {
+        return Character.toLowerCase(name.charAt(0)) + name.substring(1);
+    }
+
+    private boolean isKeySizeKnown() {
+        return keyBuilder.sizeIsStaticallyKnown;
+    }
+
+    private boolean isValueSizeKnown() {
+        return valueBuilder.sizeIsStaticallyKnown;
+    }
+
 
     private static void checkSegments(long segments) {
         if (segments <= 0) {
@@ -1287,6 +1338,10 @@ public final class ChronicleMapBuilder<K, V> implements
         return this;
     }
 
+    public double maxBloatFactor() {
+        return maxBloatFactor;
+    }
+
     @Override
     public ChronicleMapBuilder<K, V> allowSegmentTiering(boolean allowSegmentTiering) {
         this.allowSegmentTiering = allowSegmentTiering;
@@ -1604,6 +1659,12 @@ public final class ChronicleMapBuilder<K, V> implements
     @Override
     public ChronicleMapBuilder<K, V> setPreShutdownAction(Runnable preShutdownAction) {
         this.preShutdownAction = preShutdownAction;
+        return this;
+    }
+
+    @Override
+    public ChronicleMapBuilder<K, V> skipCloseOnExitHook(boolean skipCloseOnExitHook) {
+        this.skipCloseOnExitHook = skipCloseOnExitHook;
         return this;
     }
 

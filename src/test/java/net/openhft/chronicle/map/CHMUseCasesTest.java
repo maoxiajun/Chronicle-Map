@@ -251,7 +251,6 @@ public class CHMUseCasesTest {
                 for (int i = 0; i < o1.length; i++) {
                     Assert.assertArrayEquals(o1[i], o2[i]);
                 }
-
             } else throw new IllegalStateException("unsupported type");
 
         }
@@ -293,7 +292,6 @@ public class CHMUseCasesTest {
                     Assert.assertEquals(map1, actual);
                 }
             }
-
         } catch (IOException e) {
             Assert.fail();
         } finally {
@@ -444,7 +442,6 @@ public class CHMUseCasesTest {
                 mpx1030.setBidPx(107.6);
             }
         }
-
     }
 
     @Test
@@ -2544,6 +2541,29 @@ public class CHMUseCasesTest {
                 .of(IData.Data.class, IData.Data.class)
                 .keyReaderAndDataAccess(new DataReader(), new DataDataAccess())
                 .valueReaderAndDataAccess(new DataReader(), new DataDataAccess())
+                .actualChunkSize(64)
+                .entries(1000);
+        try (ChronicleMap<IData.Data, IData.Data> map = newInstance(builder)) {
+            for (int i = 0; i < 100; i++) {
+                IData.Data key = new IData.Data();
+                IData.Data value = new IData.Data();
+                key.setText("key-" + i);
+                key.setNumber(i);
+                value.setNumber(i);
+                value.setText("value-" + i);
+                map.put(key, value);
+                // check the map is still valid.
+                map.entrySet().toString();
+            }
+        }
+    }
+    @Test
+    public void testBytesMarshallable3() throws IOException {
+        BytesMarshallableReaderWriter<IData.Data> bmwr = new BytesMarshallableReaderWriter<>(IData.Data.class);
+        ChronicleMapBuilder<IData.Data, IData.Data> builder = ChronicleMapBuilder
+                .of(IData.Data.class, IData.Data.class)
+                .keyMarshaller(bmwr)
+                .valueMarshaller(bmwr)
                 .actualChunkSize(64)
                 .entries(1000);
         try (ChronicleMap<IData.Data, IData.Data> map = newInstance(builder)) {

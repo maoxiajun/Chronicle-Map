@@ -16,12 +16,12 @@
 
 package net.openhft.chronicle.map;
 
+import net.openhft.chronicle.algo.bitset.ReusableBitSet;
 import net.openhft.chronicle.algo.hashing.LongHashFunction;
 import net.openhft.chronicle.bytes.Bytes;
 import net.openhft.chronicle.bytes.BytesStore;
 import net.openhft.chronicle.bytes.PointerBytesStore;
 import net.openhft.chronicle.core.Jvm;
-import net.openhft.chronicle.core.io.Closeable;
 import net.openhft.chronicle.hash.ChronicleHashClosedException;
 import net.openhft.chronicle.hash.ChronicleHashCorruption;
 import net.openhft.chronicle.hash.Data;
@@ -44,16 +44,20 @@ import org.jetbrains.annotations.NotNull;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Type;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import static net.openhft.chronicle.map.ChronicleMapBuilder.greatestCommonDivisor;
 
+@SuppressWarnings("JavadocReference")
 public class VanillaChronicleMap<K, V, R>
         extends VanillaChronicleHash<K, MapEntry<K, V>, MapSegmentContext<K, V, ?>,
         ExternalMapQueryContext<K, V, ?>>
         implements AbstractChronicleMap<K, V> {
+
+    private double maxBloatFactor;
 
     public SizeMarshaller valueSizeMarshaller;
     public SizedReader<V> valueReader;
@@ -73,7 +77,7 @@ public class VanillaChronicleMap<K, V, R>
     public transient DefaultValueProvider<K, V> defaultValueProvider;
     /////////////////////////////////////////////////
     // Value Data model
-    Class<V> valueClass;
+    Type valueClass;
     /////////////////////////////////////////////////
     // Behavior
     transient boolean putReturnsNull;
@@ -83,9 +87,8 @@ public class VanillaChronicleMap<K, V, R>
     /////////////////////////////////////////////////
     private transient String name;
     /**
-     * identityString is initialized lazily in {@link #toIdentityString()} rather than in
-     * {@link #initOwnTransients()} because it depends on {@link #file()} which is set after
-     * initOwnTransients().
+     * identityString is initialized lazily in {@link #toIdentityString()} rather than in {@link #initOwnTransients()} because it depends on {@link
+     * #file()} which is set after initOwnTransients().
      */
     private transient String identityString;
     private transient boolean defaultEntryOperationsAndMethods;
@@ -97,6 +100,7 @@ public class VanillaChronicleMap<K, V, R>
         valueSizeMarshaller = valueBuilder.sizeMarshaller();
         valueReader = valueBuilder.reader();
         valueDataAccess = valueBuilder.dataAccess();
+        maxBloatFactor = builder.maxBloatFactor();
 
         constantlySizedEntry = builder.constantlySizedEntries();
 
@@ -116,7 +120,7 @@ public class VanillaChronicleMap<K, V, R>
     protected void readMarshallableFields(@NotNull WireIn wireIn) {
         super.readMarshallableFields(wireIn);
 
-        valueClass = wireIn.read(() -> "valueClass").typeLiteral();
+        valueClass = wireIn.read(() -> "valueClass").lenientTypeLiteral();
         valueSizeMarshaller = wireIn.read(() -> "valueSizeMarshaller").object(SizeMarshaller.class);
         valueReader = wireIn.read(() -> "valueReader").object(SizedReader.class);
         valueDataAccess = wireIn.read(() -> "valueDataAccess").object(DataAccess.class);
@@ -125,10 +129,12 @@ public class VanillaChronicleMap<K, V, R>
 
         alignment = wireIn.read(() -> "alignment").int32();
         worstAlignment = wireIn.read(() -> "worstAlignment").int32();
+        maxBloatFactor = wireIn.read(() -> "maxBloatFactor").float64();
     }
 
     @Override
     public void writeMarshallable(@NotNull WireOut wireOut) {
+        ;
         super.writeMarshallable(wireOut);
 
         wireOut.write(() -> "valueClass").typeLiteral(valueClass);
@@ -140,13 +146,13 @@ public class VanillaChronicleMap<K, V, R>
 
         wireOut.write(() -> "alignment").int32(alignment);
         wireOut.write(() -> "worstAlignment").int32(worstAlignment);
+        wireOut.write(() -> "maxBloatFactor").float64(maxBloatFactor);
     }
 
     void initTransientsFromBuilder(ChronicleMapBuilder<K, V> builder) {
         name = builder.name();
         putReturnsNull = builder.putReturnsNull();
         removeReturnsNull = builder.removeReturnsNull();
-
         entryOperations = (MapEntryOperations<K, V, R>) builder.entryOperations;
         methods = (MapMethods<K, V, R>) builder.methods;
         defaultEntryOperationsAndMethods = entryOperations == DefaultSpi.mapEntryOperations() &&
@@ -156,6 +162,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public void initTransients() {
+        throwExceptionIfClosed();
         super.initTransients();
         initOwnTransients();
     }
@@ -163,6 +170,7 @@ public class VanillaChronicleMap<K, V, R>
     public void recover(
             ChronicleHashResources resources, ChronicleHashCorruption.Listener corruptionListener,
             ChronicleHashCorruptionImpl corruption) throws IOException {
+        throwExceptionIfClosed();
         basicRecover(resources, corruptionListener, corruption);
         try (IterationContext<K, V, ?> iterationContext = iterationContext()) {
             iterationContext.recoverSegments(corruptionListener, corruption);
@@ -185,6 +193,7 @@ public class VanillaChronicleMap<K, V, R>
     }
 
     public final V checkValue(Object value) {
+        Class<V> valueClass = valueClass();
         if (!valueClass.isInstance(value)) {
             throw new ClassCastException(toIdentityString() + ": Value must be a " +
                     valueClass.getName() + " but was a " + value.getClass());
@@ -206,17 +215,78 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public Class<K> keyClass() {
+        throwExceptionIfClosed();
+        return (Class<K>) keyClass;
+    }
+
+    @Override
+    public Type keyType() {
+        throwExceptionIfClosed();
         return keyClass;
     }
 
     @Override
     public Class<V> valueClass() {
+        throwExceptionIfClosed();
+        return (Class<V>) valueClass;
+    }
+
+    @Override
+    public Type valueType() {
+        throwExceptionIfClosed();
         return valueClass;
+    }
+
+    private long tiersUsed() {
+        return globalMutableState().getExtraTiersInUse();
+    }
+
+    private long maxTiers() {
+        return (long) (maxBloatFactor * actualSegments);
+    }
+
+    @Override
+    public int remainingAutoResizes() {
+        throwExceptionIfClosed();
+        return (int) (maxTiers() - tiersUsed());
+    }
+
+    @Override
+    public short percentageFreeSpace() {
+        throwExceptionIfClosed();
+
+        double totalUsed = 0;
+        double totalSize = 0;
+
+        try (IterationContext<K, V, ?> c = iterationContext()) {
+            for (int segmentIndex = 0; segmentIndex < segments(); segmentIndex++) {
+                c.initSegmentIndex(segmentIndex);
+
+                if (!(c instanceof CompiledMapIterationContext))
+                    continue;
+                CompiledMapIterationContext c1 = (CompiledMapIterationContext) c;
+
+                c1.goToFirstTier();
+                ReusableBitSet freeList = c1.freeList();
+                totalUsed += freeList.cardinality();
+                totalSize += freeList.logicalSize();
+
+                while (c1.hasNextTier()) {
+                    c1.nextTier();
+                    ReusableBitSet freeList0 = c1.freeList();
+                    totalUsed += freeList0.cardinality();
+                    totalSize += freeList.logicalSize();
+                }
+
+            }
+        }
+
+        return (short) (100 - (int) (100 * totalUsed / totalSize));
     }
 
     @NotNull
     @Override
-    public final Closeable acquireContext(K key, V usingValue) {
+    public final MapClosable acquireContext(K key, V usingValue) {
         QueryContextInterface<K, V, R> q = queryContext(key);
         // TODO optimize to update lock in certain cases
         try {
@@ -249,11 +319,13 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public int hashCode() {
+        throwExceptionIfClosed();
         return mapHashCode();
     }
 
     @Override
     public boolean equals(Object obj) {
+        throwExceptionIfClosed();
         return mapEquals(obj);
     }
 
@@ -269,6 +341,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public String toIdentityString() {
+        throwExceptionIfClosed();
         if (identityString == null)
             identityString = makeIdentityString();
         return identityString;
@@ -286,6 +359,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public void clear() {
+        throwExceptionIfClosed();
         forEachEntry(c -> c.context().remove(c));
     }
 
@@ -296,6 +370,7 @@ public class VanillaChronicleMap<K, V, R>
     }
 
     public void alignReadPosition(Bytes entry) {
+        throwExceptionIfClosed();
         long positionAddr = entry.addressForRead(entry.readPosition());
         long skip = alignAddr(positionAddr, alignment) - positionAddr;
         if (skip > 0)
@@ -459,6 +534,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V get(Object key) {
+        throwExceptionIfClosed();
         return defaultEntryOperationsAndMethods ? optimizedGet(key, null) : defaultGet(key);
     }
 
@@ -632,6 +708,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V getUsing(K key, V usingValue) {
+        throwExceptionIfClosed();
         return defaultEntryOperationsAndMethods ? optimizedGet(key, usingValue) :
                 defaultGetUsing(key, usingValue);
     }
@@ -646,6 +723,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V acquireUsing(K key, V usingValue) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             return acquireUsingBody(q, usingValue);
         }
@@ -659,6 +737,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V putIfAbsent(K key, V value) {
+        throwExceptionIfClosed();
         checkValue(value);
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             methods.putIfAbsent(q, q.inputValueDataAccess().getData(value), q.defaultReturnValue());
@@ -668,6 +747,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public boolean remove(Object key, Object value) {
+        throwExceptionIfClosed();
         if (value == null)
             return false; // ConcurrentHashMap compatibility
         V v = checkValue(value);
@@ -678,6 +758,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public boolean replace(K key, V oldValue, V newValue) {
+        throwExceptionIfClosed();
         checkValue(oldValue);
         checkValue(newValue);
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
@@ -688,6 +769,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V replace(K key, V value) {
+        throwExceptionIfClosed();
         checkValue(value);
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             methods.replace(q, q.inputValueDataAccess().getData(value), q.defaultReturnValue());
@@ -697,6 +779,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public boolean containsKey(Object key) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             return methods.containsKey(q);
         }
@@ -704,6 +787,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V put(K key, V value) {
+        throwExceptionIfClosed();
         checkValue(value);
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             Data<V> valueData = q.inputValueDataAccess().getData(value);
@@ -716,6 +800,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V remove(Object key) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             InstanceReturnValue<V> returnValue =
                     removeReturnsNull ? NullReturnValue.get() : q.defaultReturnValue();
@@ -727,6 +812,7 @@ public class VanillaChronicleMap<K, V, R>
     @Override
     public V merge(K key, V value,
                    BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             methods.merge(q, q.inputValueDataAccess().getData(value), remappingFunction,
                     q.defaultReturnValue());
@@ -736,6 +822,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             methods.compute(q, remappingFunction, q.defaultReturnValue());
             return q.defaultReturnValue().returnValue();
@@ -744,6 +831,7 @@ public class VanillaChronicleMap<K, V, R>
 
     @Override
     public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             methods.computeIfAbsent(q, mappingFunction, q.defaultReturnValue());
             return q.defaultReturnValue().returnValue();
@@ -753,6 +841,7 @@ public class VanillaChronicleMap<K, V, R>
     @Override
     public V computeIfPresent(K key,
                               BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        throwExceptionIfClosed();
         try (QueryContextInterface<K, V, R> q = queryContext(key)) {
             methods.computeIfPresent(q, remappingFunction, q.defaultReturnValue());
             return q.defaultReturnValue().returnValue();
@@ -760,6 +849,7 @@ public class VanillaChronicleMap<K, V, R>
     }
 
     public void verifyTierCountersAreaData() {
+        throwExceptionIfClosed();
         for (int i = 0; i < actualSegments; i++) {
             try (MapSegmentContext<K, V, ?> c = segmentContext(i)) {
                 Method verifyTierCountersAreaData =

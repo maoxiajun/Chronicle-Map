@@ -129,7 +129,7 @@ Please contact us at mailto:sales@chronicle.software[sales@chronicle.software] i
 NOTE: For access to commercially available features please contact mailto:sales@chronicle.software[sales@chronicle.software].
 
 == Peer projects
- - https://github.com/OpenHFT/Chronicle-Engine[Chronicle Engine].  Reactive processing framework
+ - Chronicle Datagrid.  Reactive processing framework
  supporting Chronicle Map as a backend.
 
  - http://vanillajava.blogspot.com/2015/09/chronicle-journal-customizable-data.html[Chronicle Journal]. Another
@@ -139,8 +139,6 @@ NOTE: For access to commercially available features please contact mailto:sales@
  - https://github.com/OpenHFT/Chronicle-Map/issues[Issues]
  - https://groups.google.com/forum/#!forum/chronicle-map[Chronicle Map mailing list]
  - http://stackoverflow.com/tags/chronicle-map[Stackoverflow]
- - https://plus.google.com/communities/111431452027706917722[Chronicle User's group]
- - http://jrvis.com/red-dwarf/?user=openhft&repo=Chronicle-Map[Chronicle Map usage heatmap]
 
 '''
 <<../ReadMe.adoc#,Back to ReadMe>>

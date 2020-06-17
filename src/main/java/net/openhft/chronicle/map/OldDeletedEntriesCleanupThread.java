@@ -16,7 +16,6 @@
 
 package net.openhft.chronicle.map;
 
-import net.openhft.chronicle.core.io.Closeable;
 import net.openhft.chronicle.hash.ChronicleHashBuilderPrivateAPI;
 import net.openhft.chronicle.hash.ReplicatedHashSegmentContext;
 import net.openhft.chronicle.hash.replication.ReplicableEntry;
@@ -34,14 +33,13 @@ import static net.openhft.chronicle.hash.replication.TimeProvider.currentTime;
 import static net.openhft.chronicle.hash.replication.TimeProvider.systemTimeIntervalBetween;
 
 class OldDeletedEntriesCleanupThread extends Thread
-        implements Closeable, Predicate<ReplicableEntry> {
+        implements MapClosable, Predicate<ReplicableEntry> {
     private static final Logger LOG = LoggerFactory.getLogger(OldDeletedEntriesCleanupThread.class);
 
     /**
-     * Don't store a strong ref to a map in order to avoid it's leaking, if the user forgets to
-     * close() map, from where this thread is shut down explicitly. Dereference map within
-     * a single method, {@link #cleanupSegment()}. The map has a chance to be collected by GC when
-     * this thread is sleeping after cleaning up a segment.
+     * Don't store a strong ref to a map in order to avoid it's leaking, if the user forgets to close() map, from where this thread is shut down
+     * explicitly. Dereference map within a single method, {@link #cleanupSegment()}. The map has a chance to be collected by GC when this thread is
+     * sleeping after cleaning up a segment.
      */
     private final WeakReference<ReplicatedChronicleMap<?, ?, ?>> mapRef;
     /**
@@ -72,7 +70,7 @@ class OldDeletedEntriesCleanupThread extends Thread
 
     private long prevSegment0ScanStart = -1;
     private long removedCompletely;
-
+    private long startTime = System.currentTimeMillis();
     OldDeletedEntriesCleanupThread(ReplicatedChronicleMap<?, ?, ?> map) {
         super("Cleanup Thread for " + map.toIdentityString());
         setDaemon(true);
@@ -116,8 +114,19 @@ class OldDeletedEntriesCleanupThread extends Thread
 
     @Override
     public void run() {
+        throwExceptionIfClosed();
+        if (System.currentTimeMillis() - startTime < 1_000)
+            return;
+
         while (!shutdown) {
-            int nextSegmentIndex = cleanupSegment();
+            int nextSegmentIndex;
+            try {
+                nextSegmentIndex = cleanupSegment();
+            } catch (Exception e) {
+                if (shutdown)
+                    break;
+                throw e;
+            }
             if (nextSegmentIndex == -1)
                 return;
             if (nextSegmentIndex == 0) {
@@ -167,6 +176,7 @@ class OldDeletedEntriesCleanupThread extends Thread
 
     @Override
     public boolean test(ReplicableEntry e) {
+        throwExceptionIfClosed();
         if (shutdown)
             return false;
         if (e instanceof MapAbsentEntry) {
